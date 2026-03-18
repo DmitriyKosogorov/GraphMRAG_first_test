@@ -6,7 +6,7 @@ from qdrant_client.http import models
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 from pydantic_settings import SettingsConfigDict, BaseSettings
 from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
-import qwen_qa_utils as custom_qwen
+import utils.qwen_qa_utils as custom_qwen
 import json
 import time
 
