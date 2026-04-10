@@ -64,8 +64,9 @@ def send_messasge(messages:List[ModelMessageDict],base_url:str = "http://192.168
         print("Failed to call LLM: " + str(e))
         if hasattr(e, 'response'):
             error_info = e.response.json()  
-            code_value = error_info['error']['code']
-            print(code_value)
+            #code_value = error_info['error']['code']
+            #print(code_value)
+            print(error_info)
         else:
             code_value = "context_length_exceeded"
             print(code_value)

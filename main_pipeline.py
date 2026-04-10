@@ -3,7 +3,7 @@ from pydantic import BaseModel, ConfigDict, SkipValidation
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, ErrorResponse
 from pydantic_settings import SettingsConfigDict, BaseSettings
 from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
 import utils.qwen_qa_utils as custom_qwen
@@ -52,9 +52,15 @@ class Message(BaseModel):
 class EmbedRequest(BaseModel):
     messages: List[Message]
 
-class EmbedResponse(BaseModel):
+class MessageEmbedding(BaseModel):
     message_id: int
     embedding: List[float]
+
+class EmbedResponse(BaseModel):
+    messages: List[MessageEmbedding]
+
+class EmbedErrorResponse(BaseModel):
+    detail: str
     
 
 def extract_answer_qwen_api(question, output, prompt):
@@ -62,7 +68,7 @@ def extract_answer_qwen_api(question, output, prompt):
     tt.add_text_content(prompt)
     answer=f"Question: {question}\nAnalysis:{output}"
     tt.add_text_content(answer)
-    result = custom_qwen.send_messasge(tt)
+    result = custom_qwen.send_messasge(messages=[tt], base_url='http://192.168.19.127:8888/v1')
     return result[1][0]
 
 
@@ -96,7 +102,7 @@ class EmbeddingClient:
             raise ValueError(f"Invalid response format: {e}") from e
 
 
-    def get_embeddings(self, messages: List[Message]) -> EmbedResponse:
+    def get_embeddings(self, messages: List[Message]) -> Union[EmbedResponse, EmbedErrorResponse]:
         """
         Send a list of messages to the service and retrieve the embedding.
 
@@ -132,15 +138,15 @@ class EmbeddingClient:
 # ========== Main pipeline ==========
 if __name__ == "__main__":
     
-
-    HNKdict=read_json('/home/user/RAG/Graph-M-RAG/mytests/file_hash_comparison.json')       #file comparing filenames to hashcodes
-    filename='/home/user/RAG/Graph-M-RAG/mytests/MMLongDoc_answers.json'
+    retrieve_prompt="Answer the question based on given context. Elements of context are presented after the question. Each piece of context starts with "
+    HNKdict=read_json(f"{os.getcwd()}/file_hash_comparison.json")       #file comparing filenames to hashcodes
+    filename=f"{os.getcwd()}/MMLongDoc_answers.json"
     if(os.path.exists(filename)):    
         dataset=read_json(filename)
     else:
-        dataset=read_json('/home/user/RAG/MMLongBench_Doc/data/samples.json')
+        dataset=read_json('/home/user/RAG/MMLongBench_Doc/data/samples.json')   #path to samples from original MMLongBench_Doc
     reserve_check=True
-    with open('/home/user/RAG/Graph-M-RAG/mytests/MMLongDocEval/prompt_for_answer_extraction.md','r') as f:
+    with open(f"{os.getcwd()}/MMLongDocEval/prompt_for_answer_extraction.md",'r') as f:
         extract_prompt = f.read()
         
     mc=Minio(
@@ -151,15 +157,19 @@ if __name__ == "__main__":
             )
             
     bucket_name='pdf-processing'
+    limit=20
     
     for k, caser in enumerate(dataset):
         start_time=time.time()
         model_answer_time=0
         model_extract_time=0
-        
+
+
         #костыль для частичной обработки файлов
         if(k<-1):
-            break
+            continue
+
+        caser['status']='unknown'
         
         if('response' in caser.keys()):
             print(f"\n>>>> Already processed! {k}/{len(dataset)}\n\n")
@@ -180,7 +190,7 @@ if __name__ == "__main__":
         ]
     
         # Initialize the client (point to your actual service URL)
-        clientQwenEmb = EmbeddingClient(base_url="http://192.168.19.127:10114/embedding")
+        clientQwenEmb = EmbeddingClient(base_url="http://192.168.19.127:10115/embedding")
         clientQdrant=QdrantClient(host="localhost", port=6333)
         clientQwenMsg=custom_qwen.ModelMessageDict()
         embeds=None
@@ -191,78 +201,83 @@ if __name__ == "__main__":
         extracted_res=None
         try:
             result = clientQwenEmb.get_embeddings(messages)
-            print(f"Message ID: {result.message_id}")
-            print(f"Embedding (first 5 values): {result.embedding[:5]}...")
-            embeds=result.embedding
+            #print(f"Message ID: {result.message_id}")
+            #print(f"Embedding (first 5 values): {result.embedding[:5]}...")
+            embeds=result.messages[0].embedding
             #print(f"Total Result: {result}")
         except Exception as e:
             print(f"Error: {e}")
             
         if(embeds!=None):
             search_result = clientQdrant.query_points(
-                                    collection_name="documents",
+                                    collection_name="documents_MMLongDoc",
                                     query=embeds,
                                     with_payload=True,
                                     query_filter=Filter(must=[FieldCondition(key="file_hash", match=MatchValue(value=fileHash))]),
-                                    limit=10
+                                    limit=limit
                                 ).points
             print(f"\n\nQuery: {query}\n\n")
             
             for elem in search_result:
                 print(f"{elem.payload['text']} <-> {elem.score}\n\n")
-                
 
+            print(len(search_result))
         else:
             print('embeds are None')
-        print(len(search_result))
+
             
         #search_result=None
         
         
-        if(search_result!=None):
+        if(search_result!=None and len(search_result)>0):
             prompt=''
             retrieves=[]
             tt = custom_qwen.ModelMessageDict()
-            tt.add_text_content(query)
+            tt.add_text_content(f"Question: {query}")
             content=None
             for elem in search_result:
-                if(elem.payload['element_type']=='text'):
+                if(elem.payload['element_type'] != 'image'):
                     tt.add_text_content(elem.payload['text'])
                     content=elem.payload['text']
                 if(elem.payload['element_type'] == 'image'):
-                    try:
+                    #try:
                         response=mc.get_object(bucket_name, f"{elem.payload['img_path']}")
                         encoded_string = base64.b64encode(response.data).decode('utf-8')
                         response.close()
                         response.release_conn()
                         tt.add_img_content_base64(encoded_string)
                         content=elem.payload['img_path']
-                    except:
-                        continue
-                if(elem.payload['element_type'] == 'table'):
-                    tt.add_text_content(elem.payload['text'])
-                    content=elem.payload['text']
-                if(elem.payload['element_type']=='equation'):
-                    pass
-                retrieves.append({'qdrant_id': elem.id,'type':elem.payload['element_type'], 'file_hash':elem.payload['file_hash'], 'content': elem.payload['text'], 'score':elem.score})
-            result = custom_qwen.send_messasge(tt)
+                    #except:
+                        #continue
+                retrieves.append({'qdrant_id': elem.id,'type':elem.payload['element_type'], 'file_hash':elem.payload['file_hash'], 'content': elem.payload['text'],'page_idx': elem.payload['original_element']['page_idx'], 'score':elem.score})
+            try:
+                result = custom_qwen.send_messasge(messages=[tt], base_url='http://192.168.19.127:8888/v1')
+            except:
+                caser['status']='failed to connect to LLM'
+                print(f"failed to connect to model")
+                continue
             model_answer_time=time.time()-start_time
             start_time=time.time()
+            if(str(result[1])=='None'):
+                break
             model_answer=result[1][0]
             extracted_res=extract_answer_qwen_api(query, model_answer, extract_prompt)
             model_extract_time=time.time()-start_time
-            print(f">>> Extracted answer:\n{extracted_res}\n\n\n")
+            print(f">>> Extracted answer:\n{extracted_res}\n\n>>> Correct answer: {caser['answer']}\n\n\n")
+            caser['response'] = model_answer
+            caser['extracted_res'] = extracted_res
+            caser['score'] = score
+            caser['retrieves'] = retrieves
+            caser['status'] = 'compleated'
         else:
             print('retrieves are None')
+            caser['status']='no retrieves'
             
         print(f"\n answering time: {model_answer_time}; answer extraction time: {model_extract_time} \n")
         with open('proceeding_time.txt', 'a') as timesF:
             timesF.write(f"{model_answer_time};{model_extract_time}\n")
         
-        caser['response']=model_answer
-        caser['extracted_res']=extracted_res
-        caser['score']=score
-        caser['retrieves']=retrieves
+
         
         if(reserve_check):
             with open('MMLongDoc_answers.json', 'w') as f:

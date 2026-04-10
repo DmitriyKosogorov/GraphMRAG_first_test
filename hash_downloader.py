@@ -28,6 +28,8 @@ if __name__=='__main__':
         else:
             dict_pdfs[filename]=hasher
             
+        
+    print(len(dict_pdfs))
     with open('file_hash_comparison.json', 'w') as file:
         json.dump(dict_pdfs, file)
     
